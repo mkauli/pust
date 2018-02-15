@@ -7,3 +7,4 @@ all:
 
 clean:
 		make -C $(KDIR) M=$(PWD) clean
+		rm -f $(foreach file, $(obj-m), $(file).rc)
