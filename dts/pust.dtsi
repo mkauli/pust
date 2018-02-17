@@ -1,0 +1,27 @@
+/*
+ * Copyright (C) 2018 Martin Kaul <martin@familie-kaul.de>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/ {
+        pust: pust {
+                /*
+                 * Driver for PRU Userspace trigger, i.e. signal user-space application
+                 * the pru system event.
+                 */
+
+                compatible = "pust";
+
+                interrupt-parent = <&pruss_intc>;
+                interrupts = <16 17 18 19>;
+                interrupt-names = "trigger0", /* PRU System-Event 16 */
+                                  "trigger1", /* PRU System-Event 17 */
+                                  "trigger2", /* PRU System-Event 18 */
+                                  "trigger3"; /* PRU System-Event 19 */
+        };
+
+};
+
