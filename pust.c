@@ -27,9 +27,9 @@ static int trigger_var = 0;
  */
 struct pust_attribute
 {
-	struct kobj_attribute kobj;
+	struct kobj_attribute kobj_attr;
 	ssize_t number;
-	struct kernfs_node *trigger_kn;
+	struct kobject *kobj;
 };
 static struct pust_attribute * pust_trigger_attrs[NUMBER_OF_TRIGGER];
 
@@ -45,6 +45,7 @@ static struct platform_device *pust_pdev = NULL;
 static irqreturn_t triggerISR( int irq, void *data )
 {
 	struct pust_attribute *pust_trigger_attr;
+	struct kobject * kobj;
 
 	if( data == NULL )
 	{
@@ -52,11 +53,38 @@ static irqreturn_t triggerISR( int irq, void *data )
 	}
 
 	pust_trigger_attr = (struct pust_attribute *)data;
-	sysfs_notify( &pust_pdev->dev.kobj, NULL, "trigger0" );
+	kobj = pust_trigger_attr->kobj;
 
-	printk( KERN_INFO "pust: triggerISR(): irq %d\n", irq );
+	if( kobj == NULL )
+	{
+		printk(KERN_ERR "pust: cannot notify user-space - no kernel-object initialized. Dummy Read/write trigger device to initialize kernel-object.\n");
+		return IRQ_HANDLED;
+	}
+
+	sysfs_notify( kobj, NULL, pust_trigger_attr->kobj_attr.attr.name );
 
 	return IRQ_HANDLED;
+}
+
+/*
+ * Releases all resources created while initialize trigger sysfs file.
+ */
+static void releaseTriggerSysFS( int trigger )
+{
+	struct pust_attribute * pust_attr;
+	if( trigger >= NUMBER_OF_TRIGGER )
+	{
+		return;
+	}
+	pust_attr = pust_trigger_attrs[trigger];
+	if( pust_attr == NULL )
+	{
+		return;
+	}
+
+	pust_trigger_attrs[trigger] = NULL;
+	kfree( pust_attr->kobj_attr.attr.name );
+	kfree( pust_attr );
 }
 
 /*
@@ -65,6 +93,7 @@ static irqreturn_t triggerISR( int irq, void *data )
 static ssize_t createTriggerSysFS( int trigger )
 {
 	int error;
+	struct pust_attribute * pust_attr;
 
 	if( trigger >= NUMBER_OF_TRIGGER )
 	{
@@ -77,53 +106,56 @@ static ssize_t createTriggerSysFS( int trigger )
 	}
 
 	// create memory for sysfs file attribute
-	pust_trigger_attrs[trigger] = kmalloc( sizeof(struct kobj_attribute), GFP_ATOMIC );
-	memset( pust_trigger_attrs[trigger], 0, sizeof(struct kobj_attribute) );
-	pust_trigger_attrs[trigger]->kobj.attr.name = kmalloc( 9, GFP_ATOMIC );
+	pust_attr = kmalloc( sizeof(struct kobj_attribute), GFP_ATOMIC );
+	if( pust_attr == NULL )
+	{
+		return -ENOMEM;
+	}
+	pust_trigger_attrs[trigger] = pust_attr;
+
+	memset( pust_attr, 0, sizeof(struct kobj_attribute) );
+	pust_attr->kobj_attr.attr.name = kmalloc( 9, GFP_ATOMIC );
 
 	// initialize kernel attributes for new trigger sysfs file
-	pust_trigger_attrs[trigger]->kobj.attr.mode = 0660;
-	sprintf( (char*) pust_trigger_attrs[trigger]->kobj.attr.name, "trigger%d", trigger );
-	pust_trigger_attrs[trigger]->kobj.show = trigger_show;
-	pust_trigger_attrs[trigger]->kobj.store = trigger_store;
-	pust_trigger_attrs[trigger]->number = trigger;
+	pust_attr->kobj_attr.attr.mode = 0644;
+	sprintf( (char*) pust_attr->kobj_attr.attr.name, "trigger%d", trigger );
+	pust_attr->kobj_attr.show = trigger_show;
+	pust_attr->kobj_attr.store = trigger_store;
+	pust_attr->number = trigger;
+	pust_attr->kobj = NULL;
 
 	// create sysfs irq file
-	error = sysfs_create_file( pust_module, &pust_trigger_attrs[trigger]->kobj.attr );
+	error = sysfs_create_file( pust_module, &pust_attr->kobj_attr.attr );
 	if( error )
 	{
 		printk( KERN_ERR "pust: failed to create the trigger file in /sys/kernel/pust\n" );
+		releaseTriggerSysFS( trigger );
 		return -EPERM;
 	}
-	pust_trigger_attrs[trigger]->trigger_kn = sysfs_get_dirent(pust_pdev->dev.kobj.sd, pust_trigger_attrs[trigger]->kobj.attr.name);
-	printk( KERN_INFO "kn = %d\n", (int)(pust_trigger_attrs[trigger]->trigger_kn) );
 
 	return 0;
 }
 
 /*
- * deletes the irq corresponding sysfs file
+ * destroys the irq corresponding sysfs file
  */
-static ssize_t deleteTriggerSysFS( int trigger )
+static ssize_t destroyTriggerSysFS( int trigger )
 {
+	struct pust_attribute * pust_attr;
 	if( trigger >= NUMBER_OF_TRIGGER )
 	{
 		return -EPERM;
 	}
-	if( pust_trigger_attrs[trigger] == NULL )
+	pust_attr = pust_trigger_attrs[trigger];
+	if( pust_attr == NULL )
 	{
 		printk( KERN_ERR "pust: trigger not registered\n" );
 		return -EPERM;
 	}
 
 	// remove sysfs trigger file
-	if( pust_trigger_attrs[trigger] != NULL )
-	{
-		sysfs_remove_file( pust_module, &pust_trigger_attrs[trigger]->kobj.attr );
-		kfree( pust_trigger_attrs[trigger]->kobj.attr.name );
-		kfree( pust_trigger_attrs[trigger] );
-		pust_trigger_attrs[trigger] = NULL;
-	}
+	sysfs_remove_file( pust_module, &pust_attr->kobj_attr.attr );
+	releaseTriggerSysFS( trigger );
 
 	return 0;
 }
@@ -134,18 +166,23 @@ static ssize_t deleteTriggerSysFS( int trigger )
 static ssize_t removeTrigger( int trigger )
 {
 	int irq;
-
-	if( pust_trigger_attrs[trigger] == NULL )
+	struct pust_attribute * pust_attr;
+	if( trigger >= NUMBER_OF_TRIGGER )
 	{
-		return 0;
+		return -EPERM;
+	}
+	pust_attr = pust_trigger_attrs[trigger];
+	if( pust_attr == NULL )
+	{
+		return -EPERM;
 	}
 
 	/* unregister interrupt */
-    irq = platform_get_irq_byname(pust_pdev, pust_trigger_attrs[trigger]->kobj.attr.name);
-	free_irq( irq, &pust_trigger_attrs[trigger] );
+    irq = platform_get_irq_byname(pust_pdev, pust_attr->kobj_attr.attr.name);
+	free_irq( irq, pust_attr );
 
 	/* delete the corresponding sysfs file. */
-	return deleteTriggerSysFS(trigger);
+	return destroyTriggerSysFS(trigger);
 }
 
 static ssize_t export_show( struct kobject *kobj, struct kobj_attribute *attr, char *buf )
@@ -174,6 +211,8 @@ static ssize_t export_store( struct kobject *kobj, struct kobj_attribute *attr, 
 {
 	int error = 0;
 	int irq;
+	struct pust_attribute * pust_attr;
+	int irqflags = 0;
 
 	if( pust_pdev == NULL )
 	{
@@ -190,14 +229,20 @@ static ssize_t export_store( struct kobject *kobj, struct kobj_attribute *attr, 
 	{
 		return error;
 	}
+	pust_attr = pust_trigger_attrs[export_var];
+
+	/* initialize interrupt flags */
+	irqflags |= IRQF_TRIGGER_RISING;
+	irqflags |= IRQF_ONESHOT;
+	irqflags |= IRQF_SHARED;
 
 	/* register interrupt */
-    irq = platform_get_irq_byname(pust_pdev, pust_trigger_attrs[export_var]->kobj.attr.name);
-	error = request_threaded_irq(irq, NULL, triggerISR, IRQF_ONESHOT, dev_name(&pust_pdev->dev), &pust_trigger_attrs[export_var]);
+    irq = platform_get_irq_byname(pust_pdev, pust_attr->kobj_attr.attr.name);
+	error = request_threaded_irq(irq, NULL, triggerISR, irqflags, dev_name(&pust_pdev->dev), pust_attr);
 	if( error != 0 )
 	{
 		printk(KERN_ERR "pust: cannot register trigger IRQ %d (error=%d)\n", export_var, error);
-		deleteTriggerSysFS( export_var );
+		destroyTriggerSysFS( export_var );
 		return -EIO;
 	}
 
@@ -249,26 +294,33 @@ static ssize_t unexport_store( struct kobject *kobj, struct kobj_attribute *attr
 
 static ssize_t trigger_show( struct kobject *kobj, struct kobj_attribute *attr, char *buf )
 {
-	struct pust_attribute *pust_trigger_attrs = (struct pust_attribute *) attr;
-	if( pust_trigger_attrs == NULL )
+	struct pust_attribute * pust_attr = (struct pust_attribute *) attr;
+	if( pust_attr == NULL )
 	{
 		return -EPERM;
 	}
+	pust_attr->kobj = kobj;
 
-	// get register irq number
-	return sprintf( buf, "%d\n", pust_trigger_attrs->number );
+	return sprintf( buf, "%d\n", pust_attr->number );
 }
 
 static ssize_t trigger_store( struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count )
 {
+	struct pust_attribute * pust_attr = (struct pust_attribute *) attr;
+	if( pust_attr == NULL )
+	{
+		return -EPERM;
+	}
+	pust_attr->kobj = kobj;
+
 	sscanf( buf, "%du", &trigger_var );
 	return count;
 }
 
 static struct kobj_attribute pust_attrs[] =
 {
-  __ATTR(export, 0660, export_show, (void*)export_store),
-  __ATTR(unexport, 0660, unexport_show, (void*)unexport_store),
+  __ATTR(export, 0644, export_show, (void*)export_store),
+  __ATTR(unexport, 0644, unexport_show, (void*)unexport_store),
   __ATTR_NULL
 };
 
@@ -328,7 +380,7 @@ static void pust_exit (void)
  */
 static int pust_probe(struct platform_device *pdev)
 {
-    printk( KERN_INFO "pust: pust_probe()\n" );
+	printk( KERN_INFO "pust: pust_probe()\n" );
 
 	pust_pdev = pdev;
 	pust_init();
@@ -348,11 +400,11 @@ static int pust_remove(struct platform_device *pdev)
 		return 0;
 	}
 
-    printk( KERN_INFO "pust: pust_remove()\n" );
+	printk( KERN_INFO "pust: pust_remove()\n" );
 
 	pust_exit();
 	pust_pdev = NULL;
-    return 0;
+	return 0;
 }
 
 static const struct of_device_id pust_match_table[] = {
